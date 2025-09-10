@@ -1,0 +1,53 @@
+import serial
+import serial.tools.list_ports
+import threading
+
+class LoRaPi:
+    def __init__(self, serial_port, baudrate=9600, addr=1):
+        self.addr = addr
+        self.ser = serial.Serial(serial_port, baudrate=baudrate, timeout=1)
+
+    def send(self, message):
+        msg = f"{self.addr}:{message}\n"
+        self.ser.write(msg.encode())
+        print(f"[You] {message}")
+
+    def receive(self):
+        while True:
+            line = self.ser.readline().decode(errors='ignore').strip()
+            if line:
+                if ":" in line:
+                    addr, msg = line.split(":", 1)
+                    print(f"\n[From {addr}] {msg}\nEnter message: ", end="", flush=True)
+                else:
+                    print(f"\n[Received] {line}\nEnter message: ", end="", flush=True)
+
+def detect_lora_port():
+    ports = list(serial.tools.list_ports.comports())
+    for port in ports:
+        if "USB" in port.description or "Serial" in port.description:
+            print(f"Detected LoRa module on {port.device}")
+            return port.device
+    return "/dev/serial0"
+
+# Setup
+lora_port = detect_lora_port()
+lora = LoRaPi(serial_port=lora_port)
+
+# Start receiver thread
+receiver_thread = threading.Thread(target=lora.receive, daemon=True)
+receiver_thread.start()
+
+print("✅ LoRa Chat Ready (Raspberry Pi). Type your message below.")
+print("⚠️ Type 'exit' to quit.\n")
+
+try:
+    while True:
+        user_msg = input("Enter message: ")
+        if user_msg.lower() == "exit":
+            break
+        lora.send(user_msg)
+except KeyboardInterrupt:
+    print("\nChat closed.")
+finally:
+    lora.ser.close()
