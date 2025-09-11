@@ -4,7 +4,6 @@
 import time
 import serial
 from datetime import datetime
-import sys
 
 class sx126x:
     def __init__(self, serial_port="/dev/serial0", baudrate=9600):
@@ -28,31 +27,23 @@ class sx126x:
         """Log message for IPEX antenna usage"""
         print("📡 External IPEX antenna selected. Transmission will use this port.")
 
-    def use_internal_antenna(self):
-        """Log message for onboard PCB antenna usage"""
-        print("📡 Internal PCB antenna selected. Transmission will use this port.")
-
-# --- Runtime Antenna Selection ---
-antenna = "ipex"
-if len(sys.argv) > 1:
-    antenna = sys.argv[1].lower()
-
-# Create LoRa node using Pi's UART
+# --- Main Program ---
 node = sx126x(serial_port="/dev/serial0", baudrate=9600)
+node.use_external_antenna()
 
-if antenna == "ipex":
-    node.use_external_antenna()
-else:
-    node.use_internal_antenna()
-
-print("LoRa Continuous Sender (Raspberry Pi Direct Mount)")
-print("Sending message every 1 second... (Press Ctrl+C to stop)\n")
+print("LoRa Continuous Sender (GPS Mode)")
+print("Sending GPS coordinates every 1 second... (Press Ctrl+C to stop)\n")
 
 try:
     count = 1
     while True:
+        # Dummy GPS coordinates (replace with real GPS if available)
+        latitude = 10.7905   # Example: Trichy, TN
+        longitude = 78.7047
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"[{count}] {timestamp} - Hello LoRa"
+        msg = f"[{count}] {timestamp} - LAT:{latitude:.6f}, LON:{longitude:.6f}"
+
         node.send(msg)
         print(f"Sent: {msg}")
         count += 1
