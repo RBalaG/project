@@ -5,93 +5,47 @@ import time
 import serial
 from datetime import datetime
 
-# ===============================
-# CONFIGURATION
-# ===============================
-LORA_SERIAL_PORT = "/dev/serial0"   # Pi UART for LoRa
-GPS_SERIAL_PORT = "/dev/ttyUSB0"    # GPS module UART (change if different)
-BAUD_LORA = 9600
-BAUD_GPS = 9600
-SEND_INTERVAL = 1.0  # seconds
-
-# ===============================
-# LoRa Class
-# ===============================
-class SX126x:
-    def __init__(self, serial_port=LORA_SERIAL_PORT, baudrate=9600):
+class sx126x:
+    def __init__(self, serial_port="/dev/serial0", baudrate=9600):
+        # Open the Raspberry Pi serial port
         self.ser = serial.Serial(serial_port, baudrate, timeout=1)
         self.ser.flushInput()
-        print(f"[INFO] LoRa serial open: {serial_port} at {baudrate} baud")
+        print(f"Serial port {serial_port} opened at {baudrate} baud.")
 
     def send(self, data):
-        try:
-            self.ser.write(data.encode('utf-8') + b'\n')
-            self.ser.flush()
-            return True
-        except serial.SerialException as e:
-            print(f"[ERROR] LoRa send failed: {e}")
-            return False
+        """Send data to the LoRa module"""
+        self.ser.write(data.encode('utf-8'))
+        self.ser.flush()
+        time.sleep(0.05)  # Short wait for TX
 
-    def close(self):
+    def free_serial(self):
+        """Close serial port"""
         self.ser.close()
-        print("[INFO] LoRa serial closed")
+        print("Serial port closed.")
 
-# ===============================
-# GPS Class
-# ===============================
-class GPSModule:
-    def __init__(self, serial_port=GPS_SERIAL_PORT, baudrate=9600):
-        self.ser = serial.Serial(serial_port, baudrate, timeout=1)
-        self.ser.flushInput()
-        print(f"[INFO] GPS serial open: {serial_port} at {baudrate} baud")
+    def use_external_antenna(self):
+        """Log message for IPEX antenna usage"""
+        print("📡 External IPEX antenna connected. Transmission will use this antenna port.")
 
-    def read(self):
-        """Read NMEA sentence from GPS"""
-        try:
-            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
-            if line.startswith("$GPGGA") or line.startswith("$GPRMC"):
-                return line
-        except serial.SerialException as e:
-            print(f"[ERROR] GPS read failed: {e}")
-        return None
+# Create LoRa node using Pi's UART
+node = sx126x(serial_port="/dev/serial0", baudrate=9600)
 
-    def close(self):
-        self.ser.close()
-        print("[INFO] GPS serial closed")
+# Mark antenna type (you just plug the antenna physically)
+node.use_external_antenna()
 
-# ===============================
-# Main Logic
-# ===============================
-def main():
-    lora = SX126x()
-    gps = GPSModule()
+print("LoRa Continuous Sender (Raspberry Pi Direct Mount)")
+print("Sending message every 1 second... (Press Ctrl+C to stop)\n")
 
-    print("LoRa + GPS Sender")
-    print("Sending GPS data over LoRa every second...\n")
-
+try:
     count = 1
-    try:
-        while True:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            gps_data = gps.read()
+    while True:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg = f"[{count}] {timestamp} - Hello LoRa"
+        node.send(msg)
+        print(f"Sent: {msg}")
+        count += 1
+        time.sleep(1)  # send every 1 second
 
-            if gps_data:
-                msg = f"[{count}] {timestamp} - GPS: {gps_data}"
-            else:
-                msg = f"[{count}] {timestamp} - GPS: No fix"
-
-            if lora.send(msg):
-                print(f"[TX] {msg}")
-            else:
-                print("[ERROR] Failed to send message")
-
-            count += 1
-            time.sleep(SEND_INTERVAL)
-
-    except KeyboardInterrupt:
-        print("\n[INFO] Exiting gracefully...")
-        lora.close()
-        gps.close()
-
-if __name__ == "__main__":
-    main()
+except KeyboardInterrupt:
+    node.free_serial()
+    print("\nExiting...")
