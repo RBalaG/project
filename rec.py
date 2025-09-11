@@ -1,78 +1,62 @@
 #!/usr/bin/python3
 # -*- coding: UTF-8 -*-
 
-import time
 import serial
 import serial.tools.list_ports
+import time
 
 
-class sx126x:
-    def __init__(self, serial_num, addr, power):
+class LoRaReceiver:
+    def __init__(self, serial_port, baudrate=9600, addr=1):  # Pi as receiver addr=1
         self.addr = addr
         try:
-            self.ser = serial.Serial(serial_num, 9600, timeout=0.5)
-            self.ser.flushInput()
-            print(f"[OK] Connected to {serial_num}")
+            self.ser = serial.Serial(serial_port, baudrate=baudrate, timeout=1)
+            print(f"[OK] Connected to {serial_port}")
         except Exception as e:
-            print(f"[ERROR] Could not open serial port {serial_num}: {e}")
+            print(f"[ERROR] Could not open serial port {serial_port}: {e}")
             exit(1)
 
     def receive(self):
-        if self.ser.in_waiting:
-            data = self.ser.read(self.ser.in_waiting)
-            return data
-        return None
+        """Continuously listen for messages."""
+        while True:
+            if self.ser.in_waiting:
+                try:
+                    line = self.ser.readline().decode(errors='ignore').strip()
+                    if line:
+                        if ":" in line:
+                            src_addr, msg = line.split(":", 1)
+                            print(f"\n📩 From {src_addr}: {msg}")
+                        else:
+                            print(f"\n📩 Received: {line}")
+                except Exception as e:
+                    print(f"[ERROR] Decoding message: {e}")
+            time.sleep(0.1)
 
-    def free_serial(self):
+    def close(self):
         self.ser.close()
 
 
-def auto_detect_port():
-    """Auto-detect first available serial port (USB or GPIO)."""
-    ports = serial.tools.list_ports.comports()
-    for p in ports:
-        if "USB" in p.device or "AMA" in p.device or "serial" in p.device:
-            return p.device
-    return None
+def detect_lora_port():
+    """Auto-detect LoRa serial port (USB or GPIO)."""
+    ports = list(serial.tools.list_ports.comports())
+    for port in ports:
+        if ("USB" in port.device) or ("AMA" in port.device) or ("serial" in port.device):
+            print(f"Detected LoRa module on {port.device}")
+            return port.device
+    raise Exception("No LoRa module detected! Check connection.")
 
 
 # --- Main program ---
 print("LoRa Receiver Interface on Raspberry Pi")
 
-port = auto_detect_port()
-if not port:
-    print("❌ No LoRa device found. Please check connection.")
-    exit(1)
+port = detect_lora_port()
+receiver = LoRaReceiver(serial_port=port, addr=1)
 
-node = sx126x(serial_num=port, addr=1, power=22)  # addr=1 for receiver node
-
-print("✅ Ready! Waiting for messages...")
-print("Press Ctrl+C to exit")
+print("✅ Ready! Listening for messages (Press Ctrl+C to stop)...")
 
 try:
-    while True:
-        data = node.receive()
-        if data:
-            try:
-                # First 6 bytes are header: dest_addr_hi, dest_addr_lo, offset_freq, src_addr_hi, src_addr_lo, src_offset
-                if len(data) >= 6:
-                    dest_addr = (data[0] << 8) | data[1]
-                    offset_freq = data[2]
-                    src_addr = (data[3] << 8) | data[4]
-                    msg = data[6:].decode(errors="ignore")
-
-                    print("\n📩 Received Message:")
-                    print(f"   From: {src_addr}")
-                    print(f"   To: {dest_addr}")
-                    print(f"   Freq Offset: {offset_freq}")
-                    print(f"   Message: {msg}")
-                else:
-                    print("⚠️ Received incomplete data:", data)
-            except Exception as e:
-                print("⚠️ Error decoding message:", e)
-
-        time.sleep(0.1)
-
+    receiver.receive()
 except KeyboardInterrupt:
     print("\nExiting...")
-    node.free_serial()
+    receiver.close()
+
