@@ -1,52 +1,87 @@
-#!/usr/bin/python
-# -*- coding: UTF-8 -*-
+#!/usr/bin/python3
+
+# -- coding: UTF-8 --
+
+
 
 import time
+
 import serial
 
-class sx126x:
-    start_freq = 850
-    offset_freq = 18
+from datetime import datetime
 
-    def __init__(self, serial_num, addr, power):
-        self.addr = addr
-        self.ser = serial.Serial(serial_num, 9600, timeout=0.5)
+
+
+class sx126x:
+
+    def __init__(self, serial_port="/dev/serial0", baudrate=9600):
+
+        # Open the Raspberry Pi serial port
+
+        self.ser = serial.Serial(serial_port, baudrate, timeout=1)
+
         self.ser.flushInput()
 
+        print(f"Serial port {serial_port} opened at {baudrate} baud.")
+
+
+
     def send(self, data):
-        self.ser.write(data)
-        time.sleep(0.1)
+
+        """Send data to the LoRa module"""
+
+        self.ser.write(data.encode('utf-8'))
+
+        self.ser.flush()
+
+        time.sleep(0.05)  # Short wait for TX
+
+
 
     def free_serial(self):
+
+        """Close serial port"""
+
         self.ser.close()
 
+        print("Serial port closed.")
 
-# Configure sender laptop
-node = sx126x(serial_num="COM5", addr=0, power=22)
 
-print("LoRa Sender Interface")
-print("Type messages in format: dest_addr,freq,message")
-print("Press Ctrl+C to exit")
+
+# Create LoRa node using Pi's UART
+
+node = sx126x(serial_port="/dev/serial0", baudrate=9600)
+
+
+
+print("LoRa Continuous Sender (Raspberry Pi Direct Mount)")
+
+print("Sending message every 1 second... (Press Ctrl+C to stop)\n")
+
+
 
 try:
-    while True:
-        user_input = input("\nSend: ")
-        if user_input.strip() == "":
-            continue
-        try:
-            parts = user_input.split(",")
-            dest_addr = int(parts[0])
-            freq = int(parts[1])
-            msg = parts[2]
 
-            offset_freq = freq - (850 if freq > 850 else 410)
-            data = bytes([dest_addr >> 8, dest_addr & 0xFF, offset_freq,
-                          node.addr >> 8, node.addr & 0xFF, node.offset_freq]) + msg.encode()
-            node.send(data)
-            print("Message sent!")
-        except Exception as e:
-            print("Error sending message:", e)
+    count = 1
+
+    while True:
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        msg = f"[{count}] {timestamp} - Hello LoRa"
+
+        node.send(msg)
+
+        print(f"Sent: {msg}")
+
+        count += 1
+
+        time.sleep(1)  # send every 1 second
+
+
 
 except KeyboardInterrupt:
-    print("\nExiting...")
+
     node.free_serial()
+
+    print("\nExiting...")
