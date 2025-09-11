@@ -12,13 +12,13 @@ import RPi.GPIO as GPIO
 # ===============================
 # CONFIGURATION
 # ===============================
-BAUDRATE = 9600           # LoRa module UART baud rate
+BAUDRATE = 9600                     # LoRa module baud rate
 SERIAL_PORTS = ["/dev/serial0", "/dev/ttyAMA0"]  # Auto-detect
-SEND_INTERVAL = 1.0       # Seconds between sends
+SEND_INTERVAL = 1.0                 # Seconds between sends
 
-# GPIO Pins for TX/RX LED Indicators
-LED_TX = 17   # GPIO17 (TX activity LED)
-LED_RX = 27   # GPIO27 (RX activity LED)
+# GPIO pins for LEDs
+LED_TX = 17  # GPIO17 (Pin 11)
+LED_RX = 27  # GPIO27 (Pin 13)
 
 # ===============================
 # LoRa UART Class
@@ -41,7 +41,7 @@ class SX126x:
                     break
                 except serial.SerialException as e:
                     print(f"[ERROR] Failed to open {port}: {e}")
-
+        
         if self.ser is None:
             print("[FATAL] No serial port available! Exiting...")
             sys.exit(1)
@@ -94,14 +94,14 @@ class SX126x:
 # ===============================
 def receiver_thread(lora):
     """Thread to continuously listen for incoming messages"""
-    print("[INFO] Receiver thread started, waiting for messages...\n")
+    print("[INFO] Receiver thread started, listening for packets...\n")
     while True:
         data = lora.receive()
         if data:
             print(f"[RX] {datetime.now().strftime('%H:%M:%S')} -> {data}")
 
 # ===============================
-# Initialize GPIO
+# GPIO Setup
 # ===============================
 def setup_gpio():
     GPIO.setmode(GPIO.BCM)
@@ -115,14 +115,13 @@ def setup_gpio():
 # ===============================
 def main():
     setup_gpio()
-
     lora = SX126x(baudrate=BAUDRATE)
 
-    # Start receiver thread
+    # Start background receiver
     threading.Thread(target=receiver_thread, args=(lora,), daemon=True).start()
 
     print("===============================================")
-    print(" LoRa Continuous Sender/Receiver - Raspberry Pi")
+    print(" LoRa Sender (Raspberry Pi UART) ")
     print("===============================================\n")
     print("Press Ctrl+C to stop.\n")
 
@@ -131,8 +130,10 @@ def main():
         while True:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             msg = f"[{count}] {timestamp} - Hello from Raspberry Pi"
+
             bytes_written = lora.send(msg + "\n")
             print(f"[TX] Sent: {msg} ({bytes_written} bytes)")
+
             count += 1
             time.sleep(SEND_INTERVAL)
 
