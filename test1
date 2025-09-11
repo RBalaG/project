@@ -1,53 +1,78 @@
+#!/usr/bin/python3
+# -*- coding: UTF-8 -*-
+
+import time
 import serial
 import serial.tools.list_ports
-import threading
 
-class LoRaPi:
-    def __init__(self, serial_port, baudrate=9600, addr=1):
+
+class sx126x:
+    start_freq = 850
+    offset_freq = 18
+
+    def __init__(self, serial_num, addr, power):
         self.addr = addr
-        self.ser = serial.Serial(serial_port, baudrate=baudrate, timeout=1)
+        try:
+            self.ser = serial.Serial(serial_num, 9600, timeout=0.5)
+            self.ser.flushInput()
+            print(f"[OK] Connected to {serial_num}")
+        except Exception as e:
+            print(f"[ERROR] Could not open serial port {serial_num}: {e}")
+            exit(1)
 
-    def send(self, message):
-        msg = f"{self.addr}:{message}\n"
-        self.ser.write(msg.encode())
-        print(f"[You] {message}")
+    def send(self, data):
+        self.ser.write(data)
+        time.sleep(0.1)
 
-    def receive(self):
-        while True:
-            line = self.ser.readline().decode(errors='ignore').strip()
-            if line:
-                if ":" in line:
-                    addr, msg = line.split(":", 1)
-                    print(f"\n[From {addr}] {msg}\nEnter message: ", end="", flush=True)
-                else:
-                    print(f"\n[Received] {line}\nEnter message: ", end="", flush=True)
+    def free_serial(self):
+        self.ser.close()
 
-def detect_lora_port():
-    ports = list(serial.tools.list_ports.comports())
-    for port in ports:
-        if "USB" in port.description or "Serial" in port.description:
-            print(f"Detected LoRa module on {port.device}")
-            return port.device
-    return "/dev/serial0"
 
-# Setup
-lora_port = detect_lora_port()
-lora = LoRaPi(serial_port=lora_port)
+def auto_detect_port():
+    """Auto-detect first available serial port (USB or GPIO)."""
+    ports = serial.tools.list_ports.comports()
+    for p in ports:
+        if "USB" in p.device or "AMA" in p.device or "serial" in p.device:
+            return p.device
+    return None
 
-# Start receiver thread
-receiver_thread = threading.Thread(target=lora.receive, daemon=True)
-receiver_thread.start()
 
-print("✅ LoRa Chat Ready (Raspberry Pi). Type your message below.")
-print("⚠️ Type 'exit' to quit.\n")
+# --- Main program ---
+print("LoRa Sender Interface on Raspberry Pi")
+
+port = auto_detect_port()
+if not port:
+    print("No LoRa device found. Please check connection.")
+    exit(1)
+
+node = sx126x(serial_num=port, addr=0, power=22)
+
+print("Type messages in format: dest_addr,freq,message")
+print("Press Ctrl+C to exit")
 
 try:
     while True:
-        user_msg = input("Enter message: ")
-        if user_msg.lower() == "exit":
-            break
-        lora.send(user_msg)
+        user_input = input("\nSend: ")
+        if user_input.strip() == "":
+            continue
+        try:
+            parts = user_input.split(",")
+            dest_addr = int(parts[0])
+            freq = int(parts[1])
+            msg = parts[2]
+
+            offset_freq = freq - (850 if freq > 850 else 410)
+            data = bytes([
+                dest_addr >> 8, dest_addr & 0xFF, offset_freq,
+                node.addr >> 8, node.addr & 0xFF, node.offset_freq
+            ]) + msg.encode()
+
+            node.send(data)
+            print("Message sent!")
+
+        except Exception as e:
+            print("Error sending message:", e)
+
 except KeyboardInterrupt:
-    print("\nChat closed.")
-finally:
-    lora.ser.close()
+    print("\nExiting...")
+    node.free_serial()
