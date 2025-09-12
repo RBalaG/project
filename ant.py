@@ -4,7 +4,6 @@
 import time
 import serial
 from datetime import datetime
-import pynmea2
 
 # ----------------------------
 # LoRa Class
@@ -28,12 +27,30 @@ class sx126x:
         print("[LoRa] Port closed.")
 
 # ----------------------------
+# GPS to Decimal Conversion
+# ----------------------------
+def convert_to_decimal(raw_val, direction):
+    """
+    Convert GPS raw data (DDMM.MMMM) to decimal degrees.
+    Example: 1234.5678 -> 12 + (34.5678 / 60) = 12.57613
+    """
+    if raw_val == '' or direction == '':
+        return None
+    raw_val = float(raw_val)
+    degrees = int(raw_val // 100)
+    minutes = raw_val % 100
+    decimal = degrees + (minutes / 60)
+    if direction in ['S', 'W']:
+        decimal *= -1
+    return round(decimal, 6)
+
+# ----------------------------
 # Initialize LoRa and GPS
 # ----------------------------
-# LoRa uses /dev/serial0 (direct mount)
+# LoRa connected to Raspberry Pi
 lora = sx126x(serial_port="/dev/serial0", baudrate=9600)
 
-# GPS uses /dev/ttyAMA0
+# GPS connected to Raspberry Pi
 gps = serial.Serial("/dev/ttyAMA0", baudrate=9600, timeout=1)
 
 print("LoRa + GPS Sender Started...")
@@ -47,23 +64,36 @@ try:
         line = gps.readline().decode('ascii', errors='replace').strip()
 
         if line.startswith("$GPGGA") or line.startswith("$GPRMC"):
-            try:
-                msg = pynmea2.parse(line)
-                
-                # Extract latitude and longitude
-                if hasattr(msg, 'latitude') and hasattr(msg, 'longitude') and msg.latitude != 0:
-                    gps_data = f"Lat:{msg.latitude:.6f}, Lon:{msg.longitude:.6f}"
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    final_message = f"[{timestamp}] {gps_data}"
+            parts = line.split(',')
 
-                    # Send via LoRa
-                    lora.send(final_message)
-                    print(f"Sent: {final_message}")
-                    time.sleep(2)  # send every 2 seconds
-            except pynmea2.ParseError:
+            if line.startswith("$GPGGA") and len(parts) > 5:
+                raw_lat = parts[2]
+                lat_dir = parts[3]
+                raw_lon = parts[4]
+                lon_dir = parts[5]
+
+            elif line.startswith("$GPRMC") and len(parts) > 6:
+                raw_lat = parts[3]
+                lat_dir = parts[4]
+                raw_lon = parts[5]
+                lon_dir = parts[6]
+
+            else:
                 continue
 
+            latitude = convert_to_decimal(raw_lat, lat_dir)
+            longitude = convert_to_decimal(raw_lon, lon_dir)
+
+            if latitude is not None and longitude is not None:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                gps_data = f"[{timestamp}] Lat:{latitude}, Lon:{longitude}"
+
+                # Send via LoRa
+                lora.send(gps_data)
+                print(f"Sent: {gps_data}")
+                time.sleep(2)  # send every 2 seconds
+
 except KeyboardInterrupt:
+    print("\nExiting...")
     lora.free_serial()
     gps.close()
-    print("\nExiting...")
