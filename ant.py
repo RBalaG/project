@@ -4,51 +4,58 @@
 import time
 import serial
 from datetime import datetime
+import pynmea2  # For parsing GPS NMEA data
 
+# ----------------------------
+# LoRa Class
+# ----------------------------
 class sx126x:
     def __init__(self, serial_port="/dev/serial0", baudrate=9600):
-        # Open the Raspberry Pi serial port
         self.ser = serial.Serial(serial_port, baudrate, timeout=1)
         self.ser.flushInput()
-        print(f"Serial port {serial_port} opened at {baudrate} baud.")
+        print(f"[LoRa] Port {serial_port} opened at {baudrate} baud.")
 
     def send(self, data):
-        """Send data to the LoRa module"""
         self.ser.write(data.encode('utf-8'))
         self.ser.flush()
-        time.sleep(0.05)  # Short wait for TX
+        time.sleep(0.05)
 
-    def free_serial(self):
-        """Close serial port"""
+    def close(self):
         self.ser.close()
-        print("Serial port closed.")
+        print("[LoRa] Port closed.")
 
-    def use_external_antenna(self):
-        """Log message for IPEX antenna usage"""
-        print("📡 External IPEX antenna selected. Transmission will use this port.")
+# ----------------------------
+# Initialize LoRa and GPS
+# ----------------------------
+lora = sx126x(serial_port="/dev/serial0", baudrate=9600)
+gps = serial.Serial("/dev/ttyAMA1", baudrate=9600, timeout=1)  # GPS on UART1
 
-# --- Main Program ---
-node = sx126x(serial_port="/dev/serial0", baudrate=9600)
-node.use_external_antenna()
+print("LoRa + GPS Sender Started...")
+print("Sending GPS location every 2 seconds.\n")
 
-print("LoRa Continuous Sender (GPS Mode)")
-print("Sending GPS coordinates every 1 second... (Press Ctrl+C to stop)\n")
-
+# ----------------------------
+# Main Loop
+# ----------------------------
 try:
-    count = 1
     while True:
-        # Dummy GPS coordinates (replace with real GPS if available)
-        latitude = 10.7905   # Example: Trichy, TN
-        longitude = 78.7047
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"[{count}] {timestamp} - LAT:{latitude:.6f}, LON:{longitude:.6f}"
-
-        node.send(msg)
-        print(f"Sent: {msg}")
-        count += 1
-        time.sleep(1)  # send every 1 second
+        line = gps.readline().decode('ascii', errors='replace').strip()
+        
+        if line.startswith("$GPGGA") or line.startswith("$GPRMC"):
+            try:
+                msg = pynmea2.parse(line)
+                if hasattr(msg, 'latitude') and hasattr(msg, 'longitude'):
+                    gps_data = f"Lat: {msg.latitude:.6f}, Lon: {msg.longitude:.6f}"
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    final_message = f"[{timestamp}] {gps_data}"
+                    
+                    # Send via LoRa
+                    lora.send(final_message)
+                    print(f"Sent: {final_message}")
+                    time.sleep(2)
+            except pynmea2.ParseError:
+                continue
 
 except KeyboardInterrupt:
-    node.free_serial()
+    lora.close()
+    gps.close()
     print("\nExiting...")
