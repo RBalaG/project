@@ -1,112 +1,32 @@
-#!/usr/bin/env python3
-
-import spidev
-import RPi.GPIO as GPIO
+import serial
 import time
-import json
+import pynmea2
+from SX126x import SX126x   # Ensure you have correct SX126x library installed
 
-# LoRa Configuration (same as transmitter)
-LORA_CS_PIN = 8
-LORA_RST_PIN = 25
-LORA_DIO0_PIN = 24
-LORA_FREQUENCY = 868000000
+# Initialize GPS (on /dev/serial0 for Raspberry Pi UART)
+gps_port = "/dev/serial0"
+gps_baudrate = 9600
+gps_serial = serial.Serial(gps_port, gps_baudrate, timeout=1)
 
-class LoRaReceiver:
-    def __init__(self):
-        self.spi = spidev.SpiDev()
-        self.setup_gpio()
-        self.setup_spi()
-        
-    def setup_gpio(self):
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(LORA_CS_PIN, GPIO.OUT)
-        GPIO.setup(LORA_RST_PIN, GPIO.OUT)
-        GPIO.setup(LORA_DIO0_PIN, GPIO.IN)
-        
-        GPIO.output(LORA_CS_PIN, GPIO.HIGH)
-        GPIO.output(LORA_RST_PIN, GPIO.HIGH)
-        
-    def setup_spi(self):
-        self.spi.open(0, 0)
-        self.spi.max_speed_hz = 1000000
-        self.spi.mode = 0
-        
-    def reset(self):
-        GPIO.output(LORA_RST_PIN, GPIO.LOW)
-        time.sleep(0.01)
-        GPIO.output(LORA_RST_PIN, GPIO.HIGH)
-        time.sleep(0.05)
-        
-    def write_register(self, address, value):
-        GPIO.output(LORA_CS_PIN, GPIO.LOW)
-        self.spi.xfer2([address | 0x80, value])
-        GPIO.output(LORA_CS_PIN, GPIO.HIGH)
-        
-    def read_register(self, address):
-        GPIO.output(LORA_CS_PIN, GPIO.LOW)
-        response = self.spi.xfer2([address & 0x7F, 0x00])
-        GPIO.output(LORA_CS_PIN, GPIO.HIGH)
-        return response[1]
-        
-    def setup_receive_mode(self):
-        self.reset()
-        
-        # Set to standby mode
-        self.write_register(0x01, 0x80)
-        
-        # Set frequency
-        frf = int((LORA_FREQUENCY << 19) / 32000000)
-        self.write_register(0x06, (frf >> 16) & 0xFF)
-        self.write_register(0x07, (frf >> 8) & 0xFF)
-        self.write_register(0x08, frf & 0xFF)
-        
-        # Set to continuous receive mode
-        self.write_register(0x01, 0x85)
-        
-    def receive_data(self):
-        if GPIO.input(LORA_DIO0_PIN):
-            # Get received data length
-            length = self.read_register(0x13)
-            
-            if length > 0:
-                # Read data from FIFO
-                GPIO.output(LORA_CS_PIN, GPIO.LOW)
-                self.spi.xfer2([0x00])
-                data = self.spi.xfer2([0x00] * length)
-                GPIO.output(LORA_CS_PIN, GPIO.HIGH)
-                
-                return bytes(data).decode('utf-8')
-        return None
+# Initialize LoRa (SPI pins via GPIO)
+LoRa = SX126x(serial_num = 0, cs = 0, reset = 25, busy = 24, irq = 23, txen = 18, rxen = 19)
 
-def main():
-    print("Initializing LoRa Receiver...")
-    
-    receiver = LoRaReceiver()
-    receiver.setup_receive_mode()
-    
-    print("Receiver ready. Waiting for data...")
-    
+LoRa.begin(freq=868000000, bw=125000, sf=7, cr=5, syncWord=0x12, power=14, preamble=8, currentLimit=60.0, implicit=False)
+
+print("GPS + LoRa Sender Started")
+
+while True:
     try:
-        while True:
-            data = receiver.receive_data()
-            if data:
-                try:
-                    gps_data = json.loads(data)
-                    print(f"Received GPS Data: {gps_data}")
-                    
-                    # You can save to file or database here
-                    with open('gps_log.txt', 'a') as f:
-                        f.write(f"{time.time()}: {data}\n")
-                        
-                except json.JSONDecodeError:
-                    print(f"Received raw data: {data}")
-                    
-            time.sleep(0.1)
-            
-    except KeyboardInterrupt:
-        print("\nStopping receiver...")
-    finally:
-        GPIO.cleanup()
-
-if __name__ == "__main__":
-    main()
+        line = gps_serial.readline().decode('ascii', errors='replace')
+        if line.startswith("$GPGGA") or line.startswith("$GPRMC"):
+            msg = pynmea2.parse(line)
+            if hasattr(msg, 'latitude') and hasattr(msg, 'longitude'):
+                lat = msg.latitude
+                lon = msg.longitude
+                gps_data = f"LAT:{lat:.6f},LON:{lon:.6f}"
+                print("Sending:", gps_data)
+                LoRa.println(gps_data)
+                time.sleep(2)
+    except Exception as e:
+        print("Error:", e)
+        time.sleep(1)
