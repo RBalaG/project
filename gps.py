@@ -14,8 +14,9 @@ import RPi.GPIO as GPIO
 # ===============================
 LORA_BAUDRATE = 9600
 GPS_BAUDRATE = 9600
-LORA_PORTS = ["/dev/serial0", "/dev/ttyAMA0"]  # Auto-detect LoRa
-GPS_PORT = "/dev/ttyUSB0"  # Neo-6M GPS USB-to-UART (change if needed)
+LORA_PORT = "/dev/serial0"  # SX1262 HAT
+GPS_PORT = "/dev/serial0"   # Same UART for GPS (direct pins)
+
 SEND_INTERVAL = 2.0  # Send every 2 seconds
 
 # GPIO pins for LEDs
@@ -26,44 +27,26 @@ LED_RX = 27  # GPIO27 (Pin 13)
 # LoRa UART Class
 # ===============================
 class SX126x:
-    def __init__(self, baudrate=9600):
-        self.ser = None
-        self.baudrate = baudrate
-        self.packets_sent = 0
-        self.packets_received = 0
-        self.errors = 0
-
-        # Detect available serial port
-        for port in LORA_PORTS:
-            if os.path.exists(port):
-                try:
-                    self.ser = serial.Serial(port, baudrate, timeout=1)
-                    self.ser.flushInput()
-                    print(f"[INFO] LoRa connected to {port} at {baudrate} baud")
-                    break
-                except serial.SerialException as e:
-                    print(f"[ERROR] Failed to open {port}: {e}")
-
-        if self.ser is None:
-            print("[FATAL] No LoRa serial port available! Exiting...")
+    def __init__(self, port=LORA_PORT, baudrate=LORA_BAUDRATE):
+        try:
+            self.ser = serial.Serial(port, baudrate, timeout=1)
+            self.ser.flushInput()
+            print(f"[INFO] LoRa connected to {port} at {baudrate} baud")
+        except serial.SerialException as e:
+            print(f"[FATAL] Failed to open {port}: {e}")
             sys.exit(1)
 
     def send(self, data):
         """Send data to LoRa module"""
         try:
-            bytes_written = self.ser.write(data.encode())
-            self.packets_sent += 1
-
-            # Blink TX LED
+            self.ser.write(data.encode())
             GPIO.output(LED_TX, GPIO.HIGH)
             time.sleep(0.05)
             GPIO.output(LED_TX, GPIO.LOW)
-
-            return bytes_written
+            return True
         except serial.SerialException as e:
-            self.errors += 1
             print(f"[ERROR] UART write failed: {e}")
-            return 0
+            return False
 
     def receive(self):
         """Receive data from LoRa module"""
@@ -71,30 +54,24 @@ class SX126x:
             if self.ser.in_waiting > 0:
                 data = self.ser.readline().decode('utf-8', errors='ignore').strip()
                 if data:
-                    self.packets_received += 1
-
-                    # Blink RX LED
                     GPIO.output(LED_RX, GPIO.HIGH)
                     time.sleep(0.05)
                     GPIO.output(LED_RX, GPIO.LOW)
-
                     return data
             return None
         except serial.SerialException as e:
-            self.errors += 1
             print(f"[ERROR] UART read failed: {e}")
             return None
 
     def close(self):
-        if self.ser:
-            self.ser.close()
-            print("[INFO] LoRa serial port closed.")
+        self.ser.close()
+        print("[INFO] LoRa serial port closed.")
 
 # ===============================
 # GPS Reader
 # ===============================
 class GPSModule:
-    def __init__(self, port, baudrate=9600):
+    def __init__(self, port=GPS_PORT, baudrate=GPS_BAUDRATE):
         try:
             self.ser = serial.Serial(port, baudrate, timeout=1)
             print(f"[INFO] GPS connected on {port} at {baudrate} baud")
@@ -158,8 +135,8 @@ def main():
     print("===============================================\n")
 
     # Initialize devices
-    lora = SX126x(baudrate=LORA_BAUDRATE)
-    gps = GPSModule(port=GPS_PORT, baudrate=GPS_BAUDRATE)
+    lora = SX126x()
+    gps = GPSModule()
 
     # Start LoRa receiver in background
     threading.Thread(target=receiver_thread, args=(lora,), daemon=True).start()
