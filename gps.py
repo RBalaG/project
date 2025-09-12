@@ -1,178 +1,194 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
+# -- coding: UTF-8 --
 
-import serial
 import time
-import spidev
-import RPi.GPIO as GPIO
-import subprocess
-import json
+import serial
+import threading
 from datetime import datetime
+import os
+import sys
+import RPi.GPIO as GPIO
 
-# LoRa SX1268 Configuration
-LORA_CS_PIN = 8
-LORA_RST_PIN = 25
-LORA_DIO0_PIN = 24
-LORA_FREQUENCY = 868000000  # Adjust based on your region
+# ===============================
+# CONFIGURATION
+# ===============================
+LORA_BAUDRATE = 9600
+GPS_BAUDRATE = 9600
+LORA_PORTS = ["/dev/serial0", "/dev/ttyAMA0"]  # Auto-detect LoRa
+GPS_PORT = "/dev/ttyUSB0"  # Neo-6M GPS USB-to-UART (change if needed)
+SEND_INTERVAL = 2.0  # Send every 2 seconds
 
-class LoRaSX1268:
-    def __init__(self):
-        self.spi = spidev.SpiDev()
-        self.setup_gpio()
-        self.setup_spi()
-        
-    def setup_gpio(self):
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(LORA_CS_PIN, GPIO.OUT)
-        GPIO.setup(LORA_RST_PIN, GPIO.OUT)
-        GPIO.setup(LORA_DIO0_PIN, GPIO.IN)
-        
-        GPIO.output(LORA_CS_PIN, GPIO.HIGH)
-        GPIO.output(LORA_RST_PIN, GPIO.HIGH)
-        
-    def setup_spi(self):
-        self.spi.open(0, 0)
-        self.spi.max_speed_hz = 1000000
-        self.spi.mode = 0
-        
-    def reset(self):
-        GPIO.output(LORA_RST_PIN, GPIO.LOW)
-        time.sleep(0.01)
-        GPIO.output(LORA_RST_PIN, GPIO.HIGH)
-        time.sleep(0.05)
-        
-    def write_register(self, address, value):
-        GPIO.output(LORA_CS_PIN, GPIO.LOW)
-        self.spi.xfer2([address | 0x80, value])
-        GPIO.output(LORA_CS_PIN, GPIO.HIGH)
-        
-    def read_register(self, address):
-        GPIO.output(LORA_CS_PIN, GPIO.LOW)
-        response = self.spi.xfer2([address & 0x7F, 0x00])
-        GPIO.output(LORA_CS_PIN, GPIO.HIGH)
-        return response[1]
-        
-    def setup_lora(self):
-        self.reset()
-        
-        # Set to sleep mode
-        self.write_register(0x01, 0x00)
-        
-        # Set frequency
-        frf = int((LORA_FREQUENCY << 19) / 32000000)
-        self.write_register(0x06, (frf >> 16) & 0xFF)
-        self.write_register(0x07, (frf >> 8) & 0xFF)
-        self.write_register(0x08, frf & 0xFF)
-        
-        # PA config
-        self.write_register(0x09, 0xFF)
-        self.write_register(0x0A, 0x09)
-        
-        # LNA config
-        self.write_register(0x0C, 0x23)
-        
-        # Set to transmit mode
-        self.write_register(0x01, 0x83)
-        
-    def send_data(self, data):
-        # Convert data to bytes
-        if isinstance(data, str):
-            data = data.encode('utf-8')
-            
-        # Set payload length
-        self.write_register(0x22, len(data))
-        
-        # Write data to FIFO
-        GPIO.output(LORA_CS_PIN, GPIO.LOW)
-        self.spi.xfer2([0x80] + list(data))
-        GPIO.output(LORA_CS_PIN, GPIO.HIGH)
-        
-        # Start transmission
-        self.write_register(0x01, 0x83)
-        
-        # Wait for transmission complete
-        while GPIO.input(LORA_DIO0_PIN) == 0:
-            time.sleep(0.1)
-            
-        print(f"Data sent: {data}")
+# GPIO pins for LEDs
+LED_TX = 17  # GPIO17 (Pin 11)
+LED_RX = 27  # GPIO27 (Pin 13)
 
-class GPSReader:
-    def __init__(self, port='/dev/ttyS0', baudrate=9600):
-        self.ser = serial.Serial(port, baudrate, timeout=1)
-        
-    def read_gps_data(self):
+# ===============================
+# LoRa UART Class
+# ===============================
+class SX126x:
+    def __init__(self, baudrate=9600):
+        self.ser = None
+        self.baudrate = baudrate
+        self.packets_sent = 0
+        self.packets_received = 0
+        self.errors = 0
+
+        # Detect available serial port
+        for port in LORA_PORTS:
+            if os.path.exists(port):
+                try:
+                    self.ser = serial.Serial(port, baudrate, timeout=1)
+                    self.ser.flushInput()
+                    print(f"[INFO] LoRa connected to {port} at {baudrate} baud")
+                    break
+                except serial.SerialException as e:
+                    print(f"[ERROR] Failed to open {port}: {e}")
+
+        if self.ser is None:
+            print("[FATAL] No LoRa serial port available! Exiting...")
+            sys.exit(1)
+
+    def send(self, data):
+        """Send data to LoRa module"""
         try:
-            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
-            if line.startswith('$GPGGA'):
-                return self.parse_gpgga(line)
-        except Exception as e:
-            print(f"GPS read error: {e}")
-            return None
-            
-    def parse_gpgga(self, data):
-        parts = data.split(',')
-        if len(parts) >= 10 and parts[6] != '0':  # Fix quality > 0
-            return {
-                'time': parts[1],
-                'latitude': self.convert_coordinate(parts[2], parts[3]),
-                'longitude': self.convert_coordinate(parts[4], parts[5]),
-                'fix_quality': parts[6],
-                'satellites': parts[7],
-                'altitude': parts[9],
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        return None
-        
-    def convert_coordinate(self, coord, direction):
-        if not coord or coord == '':
-            return 0.0
-            
-        # Convert DDMM.MMMM to decimal degrees
-        degrees = float(coord[:2])
-        minutes = float(coord[2:])
-        decimal = degrees + (minutes / 60.0)
-        
-        if direction in ['S', 'W']:
-            decimal = -decimal
-            
-        return round(decimal, 6)
+            bytes_written = self.ser.write(data.encode())
+            self.packets_sent += 1
 
+            # Blink TX LED
+            GPIO.output(LED_TX, GPIO.HIGH)
+            time.sleep(0.05)
+            GPIO.output(LED_TX, GPIO.LOW)
+
+            return bytes_written
+        except serial.SerialException as e:
+            self.errors += 1
+            print(f"[ERROR] UART write failed: {e}")
+            return 0
+
+    def receive(self):
+        """Receive data from LoRa module"""
+        try:
+            if self.ser.in_waiting > 0:
+                data = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                if data:
+                    self.packets_received += 1
+
+                    # Blink RX LED
+                    GPIO.output(LED_RX, GPIO.HIGH)
+                    time.sleep(0.05)
+                    GPIO.output(LED_RX, GPIO.LOW)
+
+                    return data
+            return None
+        except serial.SerialException as e:
+            self.errors += 1
+            print(f"[ERROR] UART read failed: {e}")
+            return None
+
+    def close(self):
+        if self.ser:
+            self.ser.close()
+            print("[INFO] LoRa serial port closed.")
+
+# ===============================
+# GPS Reader
+# ===============================
+class GPSModule:
+    def __init__(self, port, baudrate=9600):
+        try:
+            self.ser = serial.Serial(port, baudrate, timeout=1)
+            print(f"[INFO] GPS connected on {port} at {baudrate} baud")
+        except serial.SerialException as e:
+            print(f"[FATAL] GPS module not found: {e}")
+            sys.exit(1)
+
+    def read_location(self):
+        """Read and parse NMEA sentences to get latitude and longitude"""
+        line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+
+        if line.startswith("$GPGGA") or line.startswith("$GPRMC"):
+            data = line.split(",")
+            if line.startswith("$GPGGA") and len(data) > 5 and data[2] and data[4]:
+                lat = self._convert_to_degrees(data[2])
+                lon = self._convert_to_degrees(data[4])
+                if data[3] == "S":
+                    lat = -lat
+                if data[5] == "W":
+                    lon = -lon
+                return lat, lon
+        return None
+
+    def _convert_to_degrees(self, raw_value):
+        """Convert raw GPS NMEA value to decimal degrees"""
+        try:
+            degrees = float(raw_value[:2])
+            minutes = float(raw_value[2:])
+            return degrees + (minutes / 60.0)
+        except:
+            return 0.0
+
+# ===============================
+# Receiver Thread
+# ===============================
+def receiver_thread(lora):
+    print("[INFO] Receiver thread started, listening for packets...\n")
+    while True:
+        data = lora.receive()
+        if data:
+            print(f"[RX] {datetime.now().strftime('%H:%M:%S')} -> {data}")
+
+# ===============================
+# GPIO Setup
+# ===============================
+def setup_gpio():
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(LED_TX, GPIO.OUT)
+    GPIO.setup(LED_RX, GPIO.OUT)
+    GPIO.output(LED_TX, GPIO.LOW)
+    GPIO.output(LED_RX, GPIO.LOW)
+
+# ===============================
+# Main Logic
+# ===============================
 def main():
-    print("Initializing GPS and LoRa...")
-    
-    # Initialize GPS
-    gps = GPSReader()
-    
-    # Initialize LoRa
-    lora = LoRaSX1268()
-    lora.setup_lora()
-    
-    print("System ready. Waiting for GPS fix...")
-    
+    setup_gpio()
+
+    print("===============================================")
+    print(" LoRa + Neo-6M GPS Sender (Raspberry Pi) ")
+    print("===============================================\n")
+
+    # Initialize devices
+    lora = SX126x(baudrate=LORA_BAUDRATE)
+    gps = GPSModule(port=GPS_PORT, baudrate=GPS_BAUDRATE)
+
+    # Start LoRa receiver in background
+    threading.Thread(target=receiver_thread, args=(lora,), daemon=True).start()
+
+    print("Press Ctrl+C to stop.\n")
+    count = 1
+
     try:
         while True:
-            # Read GPS data
-            gps_data = gps.read_gps_data()
-            
-            if gps_data:
-                # Convert to JSON string
-                json_data = json.dumps(gps_data)
-                print(f"GPS Data: {json_data}")
-                
-                # Send via LoRa
-                lora.send_data(json_data)
-                
-                # Wait before next transmission
-                time.sleep(30)  # Send every 30 seconds
+            location = gps.read_location()
+            if location:
+                lat, lon = location
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                msg = f"[{count}] {timestamp} LAT:{lat:.6f}, LON:{lon:.6f}"
+
+                # Send GPS data via LoRa
+                lora.send(msg + "\n")
+                print(f"[TX] Sent GPS: {msg}")
+
+                count += 1
             else:
-                print("Waiting for GPS fix...")
-                time.sleep(5)
-                
+                print("[WARN] Waiting for valid GPS signal...")
+
+            time.sleep(SEND_INTERVAL)
+
     except KeyboardInterrupt:
-        print("\nStopping...")
-    finally:
+        print("\n[INFO] Exiting gracefully...")
+        lora.close()
         GPIO.cleanup()
-        if hasattr(gps, 'ser'):
-            gps.ser.close()
 
 if __name__ == "__main__":
     main()
