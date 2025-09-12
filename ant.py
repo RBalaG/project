@@ -1,69 +1,85 @@
 #!/usr/bin/python3
-# -- coding: UTF-8 --
-
-import time
 import serial
+import time
 from datetime import datetime
-import pynmea2
 
-# ----------------------------
-# LoRa Class
-# ----------------------------
-class sx126x:
-    def __init__(self, serial_port="/dev/serial0", baudrate=9600):
-        """Initialize LoRa serial connection"""
-        self.ser = serial.Serial(serial_port, baudrate, timeout=1)
-        self.ser.flushInput()
-        print(f"[LoRa] Port {serial_port} opened at {baudrate} baud.")
+# --------------------------
+# Configuration
+# --------------------------
+GPS_PORT = "/dev/ttyAMA1"   # GPS connected to LoRa UART header
+LORA_PORT = "/dev/ttyAMA0"  # LoRa directly mounted on Raspberry Pi
+BAUD_RATE = 9600
 
-    def send(self, data):
-        """Send data to the LoRa module"""
-        self.ser.write(data.encode('utf-8'))
-        self.ser.flush()
-        time.sleep(0.05)
+# --------------------------
+# Open Serial Connections
+# --------------------------
+try:
+    gps = serial.Serial(GPS_PORT, baudrate=BAUD_RATE, timeout=1)
+    print(f"[INFO] Connected to GPS module on {GPS_PORT}")
+except Exception as e:
+    print(f"[ERROR] Could not open GPS port {GPS_PORT}: {e}")
+    exit(1)
 
-    def free_serial(self):
-        """Close serial port"""
-        self.ser.close()
-        print("[LoRa] Port closed.")
+try:
+    lora = serial.Serial(LORA_PORT, baudrate=BAUD_RATE, timeout=1)
+    print(f"[INFO] Connected to LoRa module on {LORA_PORT}")
+except Exception as e:
+    print(f"[ERROR] Could not open LoRa port {LORA_PORT}: {e}")
+    exit(1)
 
-# ----------------------------
-# Initialize LoRa and GPS
-# ----------------------------
-# LoRa uses /dev/serial0 (direct mount)
-lora = sx126x(serial_port="/dev/serial0", baudrate=9600)
+# --------------------------
+# GPS Parser
+# --------------------------
+def parse_gpgga(sentence):
+    """Extract latitude and longitude from GPGGA sentence"""
+    try:
+        parts = sentence.split(',')
+        if parts[0] == "$GPGGA" and len(parts) > 5 and parts[2] and parts[4]:
+            # Latitude
+            lat_raw = parts[2]
+            lat_dir = parts[3]
+            lon_raw = parts[4]
+            lon_dir = parts[5]
 
-# GPS uses /dev/ttyAMA0
-gps = serial.Serial("/dev/ttyAMA0", baudrate=9600, timeout=1)
+            lat = float(lat_raw[:2]) + float(lat_raw[2:]) / 60.0
+            if lat_dir == 'S':
+                lat = -lat
 
-print("LoRa + GPS Sender Started...")
-print("Sending GPS location every 2 seconds. Press Ctrl+C to stop.\n")
+            lon = float(lon_raw[:3]) + float(lon_raw[3:]) / 60.0
+            if lon_dir == 'W':
+                lon = -lon
 
-# ----------------------------
+            return round(lat, 6), round(lon, 6)
+    except:
+        return None
+    return None
+
+# --------------------------
 # Main Loop
-# ----------------------------
+# --------------------------
+print("[INFO] Starting GPS → LoRa transmission...\n")
 try:
     while True:
-        line = gps.readline().decode('ascii', errors='replace').strip()
+        gps_line = gps.readline().decode('utf-8', errors='replace').strip()
 
-        if line.startswith("$GPGGA") or line.startswith("$GPRMC"):
-            try:
-                msg = pynmea2.parse(line)
-                
-                # Extract latitude and longitude
-                if hasattr(msg, 'latitude') and hasattr(msg, 'longitude') and msg.latitude != 0:
-                    gps_data = f"Lat:{msg.latitude:.6f}, Lon:{msg.longitude:.6f}"
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    final_message = f"[{timestamp}] {gps_data}"
+        if gps_line.startswith("$GPGGA"):
+            coords = parse_gpgga(gps_line)
+            if coords:
+                lat, lon = coords
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                message = f"{timestamp} | LAT:{lat} LON:{lon}"
 
-                    # Send via LoRa
-                    lora.send(final_message)
-                    print(f"Sent: {final_message}")
-                    time.sleep(2)  # send every 2 seconds
-            except pynmea2.ParseError:
-                continue
+                # Send to LoRa
+                lora.write((message + "\n").encode('utf-8'))
+                lora.flush()
+
+                print(f"[SENT] {message}")
+
+        time.sleep(1)
 
 except KeyboardInterrupt:
-    lora.free_serial()
+    print("\n[INFO] Transmission stopped by user.")
+finally:
     gps.close()
-    print("\nExiting...")
+    lora.close()
+    print("[INFO] Serial ports closed.")
