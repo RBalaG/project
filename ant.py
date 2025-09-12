@@ -47,10 +47,12 @@ print("\n[INFO] LoRa + GPS Sender Started")
 print("Sending GPS data every 2 seconds. Press Ctrl+C to stop.\n")
 
 # ----------------------------
-# Helper Function: Parse GPS
+# Helper Function: Parse GPGGA
 # ----------------------------
 def parse_gpgga(sentence):
-    """Extract latitude and longitude from GPGGA sentence"""
+    """
+    Extract latitude and longitude from GPGGA NMEA sentence
+    """
     try:
         parts = sentence.split(',')
         if parts[0] == "$GPGGA" and len(parts) > 5 and parts[2] and parts[4]:
@@ -60,6 +62,7 @@ def parse_gpgga(sentence):
             lon_raw = parts[4]
             lon_dir = parts[5]
 
+            # Convert to decimal degrees
             lat = float(lat_raw[:2]) + float(lat_raw[2:]) / 60.0
             if lat_dir == 'S':
                 lat = -lat
@@ -69,7 +72,7 @@ def parse_gpgga(sentence):
                 lon = -lon
 
             return round(lat, 6), round(lon, 6)
-    except:
+    except Exception:
         return None
     return None
 
@@ -80,7 +83,7 @@ try:
     while True:
         line = gps.readline().decode('utf-8', errors='replace').strip()
 
-        if line.startswith("$GPGGA"):
+        if line.startswith("$GPGGA"):  # GPS position fix sentence
             coords = parse_gpgga(line)
             if coords:
                 lat, lon = coords
