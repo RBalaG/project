@@ -1,102 +1,35 @@
-#!/usr/bin/python3
-import time
 import serial
-from datetime import datetime
+import time
+from sx126x import SX126x
 
-# ----------------------------
-# LoRa Class
-# ----------------------------
-class sx126x:
-    def __init__(self, serial_port="/dev/serial0", baudrate=9600):
-        """Initialize LoRa serial connection"""
-        try:
-            self.ser = serial.Serial(serial_port, baudrate, timeout=1)
-            self.ser.flushInput()
-            print(f"[LoRa] Port {serial_port} opened at {baudrate} baud.")
-        except Exception as e:
-            print(f"[ERROR] Cannot open LoRa port {serial_port}: {e}")
-            exit(1)
+# Configure LoRa (adjust pins as per your wiring)
+lora = SX126x(
+    serial_num="/dev/ttyS0",
+    freq=868,
+    addr=0x01,
+    power=22,
+    rssi=True,
+    air_speed=2400,
+    relay=False,
+    crypt=False
+)
 
-    def send(self, data):
-        """Send data to the LoRa module"""
-        self.ser.write((data + "\n").encode('utf-8'))
-        self.ser.flush()
-        time.sleep(0.05)
+# GPS Serial port (change if needed)
+gps_serial = serial.Serial('/dev/serial0', 9600, timeout=1)
 
-    def free_serial(self):
-        """Close serial port"""
-        self.ser.close()
-        print("[LoRa] Port closed.")
-
-# ----------------------------
-# GPS Initialization
-# ----------------------------
-try:
-    gps = serial.Serial("/dev/ttyAMA0", baudrate=9600, timeout=1)
-    print("[GPS] Connected to Neo-6M GPS module on /dev/ttyAMA0")
-except Exception as e:
-    print(f"[ERROR] Cannot open GPS port: {e}")
-    exit(1)
-
-# ----------------------------
-# LoRa Initialization
-# ----------------------------
-lora = sx126x(serial_port="/dev/serial0", baudrate=9600)
-
-print("\n[INFO] LoRa + GPS Sender Started")
-print("Sending GPS data every 2 seconds. Press Ctrl+C to stop.\n")
-
-# ----------------------------
-# Helper Function: Parse GPGGA
-# ----------------------------
-def parse_gpgga(sentence):
-    """
-    Extract latitude and longitude from GPGGA NMEA sentence
-    """
-    try:
-        parts = sentence.split(',')
-        if parts[0] == "$GPGGA" and len(parts) > 5 and parts[2] and parts[4]:
-            # Latitude
-            lat_raw = parts[2]
-            lat_dir = parts[3]
-            lon_raw = parts[4]
-            lon_dir = parts[5]
-
-            # Convert to decimal degrees
-            lat = float(lat_raw[:2]) + float(lat_raw[2:]) / 60.0
-            if lat_dir == 'S':
-                lat = -lat
-
-            lon = float(lon_raw[:3]) + float(lon_raw[3:]) / 60.0
-            if lon_dir == 'W':
-                lon = -lon
-
-            return round(lat, 6), round(lon, 6)
-    except Exception:
-        return None
-    return None
-
-# ----------------------------
-# Main Loop
-# ----------------------------
-try:
+def get_gps_line():
     while True:
-        line = gps.readline().decode('utf-8', errors='replace').strip()
+        line = gps_serial.readline().decode('ascii', errors='replace')
+        if line.startswith('$GPGGA') or line.startswith('$GPRMC'):
+            return line.strip()
 
-        if line.startswith("$GPGGA"):  # GPS position fix sentence
-            coords = parse_gpgga(line)
-            if coords:
-                lat, lon = coords
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                message = f"[{timestamp}] LAT:{lat}, LON:{lon}"
+def main():
+    print("Starting GPS to LoRa sender...")
+    while True:
+        gps_data = get_gps_line()
+        print(f"Sending: {gps_data}")
+        lora.send(gps_data)
+        time.sleep(1)
 
-                # Send data via LoRa
-                lora.send(message)
-                print(f"[SENT] {message}")
-
-        time.sleep(2)
-
-except KeyboardInterrupt:
-    print("\n[INFO] Stopping sender...")
-    gps.close()
-    lora.free_serial()
+if __name__ == "__main__":
+    main()
