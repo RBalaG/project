@@ -1,264 +1,216 @@
 #!/usr/bin/python3
 # -- coding: UTF-8 --
 
-import tkinter as tk
-from tkinter import scrolledtext, messagebox, ttk
-from tkintermapview import TkinterMapView
 import serial
-import serial.tools.list_ports
-import re
-import sys
-import traceback
+import time
+import threading
+import tkinter as tk
+from tkinter import scrolledtext, messagebox
+from tkintermapview import TkinterMapView
 from datetime import datetime
+import sys
+import os
+import re
+from typing import Optional, Tuple
+
+# ===============================
+# CONFIGURATION
+# ===============================
+UART_PORT = "COM9"   # Change for your setup
+BAUDRATE = 9600
 
 
-class GPSReceiverApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("🚗 LoRa GPS Tracker")
-        self.root.geometry("1280x780")
-        self.root.configure(bg="#121212")
-
-        # Serial variables
-        self.serial_conn = None
-        self.running = False
-
-        # Path tracking
-        self.path_points = []
-        self.path_line = None
-        self.auto_center = True
-
-        # ---------------- Header ----------------
-        header = tk.Frame(root, bg="#1f2937", height=50)
-        header.pack(fill=tk.X)
-        tk.Label(header, text="🚀 LoRa GPS Live Tracker",
-                 fg="white", bg="#1f2937",
-                 font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT, padx=15, pady=10)
-
-        # ---------------- Control Panel ----------------
-        control_frame = tk.Frame(root, bg="#1e1e2e", height=60)
-        control_frame.pack(fill=tk.X, padx=10, pady=5)
-
-        tk.Label(control_frame, text="COM Port:", fg="white", bg="#1e1e2e", font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=5)
-        self.port_var = tk.StringVar()
-        self.port_menu = ttk.Combobox(control_frame, textvariable=self.port_var,
-                                      values=self.get_serial_ports(), width=10, state="readonly")
-        self.port_menu.pack(side=tk.LEFT, padx=5)
-
-        self.refresh_ports_button = tk.Button(control_frame, text="🔄 Refresh Ports", command=self.refresh_ports,
-                                              bg="#2563eb", fg="white", relief="flat", padx=10, pady=5)
-        self.refresh_ports_button.pack(side=tk.LEFT, padx=5)
-
-        tk.Label(control_frame, text="Baud Rate:", fg="white", bg="#1e1e2e", font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=5)
-        self.baud_var = tk.StringVar(value="9600")
-        self.baud_entry = tk.Entry(control_frame, textvariable=self.baud_var, width=8,
-                                   bg="#1f2937", fg="white", insertbackground="white", relief="flat")
-        self.baud_entry.pack(side=tk.LEFT, padx=5)
-
-        self.start_button = tk.Button(control_frame, text="▶ Start", command=self.start_receiving,
-                                      bg="#16a34a", fg="white", relief="flat", padx=12, pady=5)
-        self.start_button.pack(side=tk.LEFT, padx=5)
-
-        self.stop_button = tk.Button(control_frame, text="⏹ Stop", command=self.stop_receiving,
-                                     bg="#dc2626", fg="white", relief="flat", padx=12, pady=5)
-        self.stop_button.pack(side=tk.LEFT, padx=5)
-
-        self.center_button = tk.Button(control_frame, text="📍 Auto-Center ON", command=self.toggle_center,
-                                       bg="#0ea5e9", fg="white", relief="flat", padx=12, pady=5)
-        self.center_button.pack(side=tk.RIGHT, padx=5)
-
-        self.map_toggle_button = tk.Button(control_frame, text="🗺 Switch to Satellite", command=self.toggle_map,
-                                           bg="#9333ea", fg="white", relief="flat", padx=12, pady=5)
-        self.map_toggle_button.pack(side=tk.RIGHT, padx=5)
-
-        # ---------------- Speed Display ----------------
-        self.speed_var = tk.StringVar(value="Speed: 0.00 km/h")
-        self.speed_label = tk.Label(root, textvariable=self.speed_var,
-                                    font=("Segoe UI", 14, "bold"), fg="#22d3ee", bg="#121212")
-        self.speed_label.pack(pady=5)
-
-        # ---------------- Serial Output Panel ----------------
-        output_frame = tk.LabelFrame(root, text="📜 Serial Output", fg="white", bg="#1e1e2e",
-                                     font=("Segoe UI", 11, "bold"))
-        output_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        self.text_area = scrolledtext.ScrolledText(output_frame, wrap=tk.WORD, height=10,
-                                                   bg="#1f2937", fg="white", insertbackground="white",
-                                                   relief="flat", font=("Consolas", 10))
-        self.text_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.text_area.tag_config("success", foreground="lightgreen")
-        self.text_area.tag_config("error", foreground="red")
-        self.text_area.tag_config("info", foreground="cyan")
-
-        # ---------------- Map Panel ----------------
-        map_frame = tk.LabelFrame(root, text="🗺 Live Map", fg="white", bg="#1e1e2e", font=("Segoe UI", 11, "bold"))
-        map_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        self.map_widget = TkinterMapView(map_frame, width=1180, height=450, corner_radius=0)
-        self.map_widget.set_position(20.5937, 78.9629)
-        self.map_widget.set_zoom(5)
-        self.set_street_map()
-        self.map_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        self.marker = None
-        self.path_line = None
-        self.map_modes = ["street", "satellite", "hybrid"]
-        self.map_mode_index = 0
-
-        # ---------------- Status Bar ----------------
-        self.status_var = tk.StringVar(value="🔌 Disconnected")
-        status_bar = tk.Label(root, textvariable=self.status_var, anchor="w",
-                              fg="white", bg="#1f2937", font=("Segoe UI", 9))
-        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
-
-        # ---------------- Window Close ----------------
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    # ---------------- Helper Functions ----------------
-    def get_serial_ports(self):
-        return [port.device for port in serial.tools.list_ports.comports()]
-
-    def refresh_ports(self):
-        self.port_menu["values"] = self.get_serial_ports()
-        self.log_message("🔄 Ports refreshed", "info")
-        # Reset map and path
-        self.path_points.clear()
-        if self.path_line:
-            self.map_widget.delete(self.path_line)
-            self.path_line = None
-        if self.marker:
-            self.map_widget.delete(self.marker)
-            self.marker = None
-        self.log_message("🗺 Map reset for new path", "info")
-
-    def log_message(self, message, tag="normal"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.text_area.configure(state="normal")
-        self.text_area.insert(tk.END, f"[{timestamp}] {message}\n", tag)
-        self.text_area.see(tk.END)
-        self.text_area.configure(state="disabled")
-
-    # ---------------- Serial Functions ----------------
-    def start_receiving(self):
-        port = self.port_var.get()
-        if not port:
-            messagebox.showwarning("Warning", "Please select a COM port")
-            return
-        baud = int(self.baud_var.get())
+# ===============================
+# LoRa Receiver Class
+# ===============================
+class LoRaReceiver:
+    def __init__(self, port: str, baudrate: int = 9600):
+        if not self.is_port_valid(port):
+            print(f"[FATAL] Serial port '{port}' not found or invalid.")
+            sys.exit(1)
         try:
-            self.serial_conn = serial.Serial(port, baud, timeout=1)
-            self.running = True
-            self.log_message(f"✅ Connected to {port} at {baud} baud", "success")
-            self.status_var.set(f"🟢 Connected to {port}")
-            self.root.after(50, self.receive_data_loop)  # Start loop
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to connect: {e}")
-            self.log_message(f"❌ Connection failed: {e}", "error")
+            self.ser = serial.Serial(port, baudrate, timeout=1)
+            self.ser.reset_input_buffer()
+        except serial.SerialException as e:
+            print(f"[ERROR] Unable to open serial port '{port}': {e}")
+            sys.exit(1)
 
-    def stop_receiving(self):
-        self.running = False
-        if self.serial_conn:
-            try:
-                if self.serial_conn.is_open:
-                    self.serial_conn.close()
-            except Exception:
-                pass
-        self.serial_conn = None
-        self.log_message("⛔ Connection stopped", "error")
-        self.status_var.set("🔌 Disconnected")
+    @staticmethod
+    def is_port_valid(port: str) -> bool:
+        """Validate serial port name."""
+        if os.name == "nt":  # Windows: allow COMxx
+            return bool(re.match(r"COM[0-9]+", port.upper()))
+        else:  # Linux: check device path
+            return os.path.exists(port)
 
-    def receive_data_loop(self):
-        if not self.running or not self.serial_conn:
-            return
-        pattern = re.compile(r"LAT:([\d\.\-]+)\s+LON:([\d\.\-]+)\s+SPD:([\d\.]+)km/h")
+    def receive(self) -> Optional[str]:
+        """Read one line if available."""
         try:
-            if self.serial_conn.in_waiting:
-                line = self.serial_conn.readline().decode("utf-8", errors="ignore").strip()
-                if line:
-                    self.log_message(line)
-                    match = pattern.search(line)
-                    if match:
-                        lat = float(match.group(1))
-                        lon = float(match.group(2))
-                        spd = float(match.group(3))
-                        self.update_map(lat, lon, spd)
+            if self.ser.in_waiting > 0:
+                data = self.ser.readline().decode(errors="ignore").strip()
+                return data
+        except serial.SerialException as e:
+            print(f"[ERROR] Serial read error: {e}")
+        return None
+
+    def close(self) -> None:
+        try:
+            self.ser.close()
         except serial.SerialException:
-            self.log_message("⚠️ Serial port disconnected!", "error")
-            self.stop_receiving()
-        except Exception as e:
-            self.log_message(f"⚠️ Error reading data: {e}", "error")
-        finally:
-            self.root.after(50, self.receive_data_loop)  # Schedule next check
+            pass
 
-    # ---------------- Map Functions ----------------
-    def update_map(self, lat, lon, spd):
-        self.speed_var.set(f"Speed: {spd:.2f} km/h")
-        marker_color = "green" if spd > 0 else "red"
 
-        if self.marker:
-            self.marker.set_position(lat, lon)
-            self.marker.set_text(f"📍 LoRa GPS\nSpeed: {spd:.2f} km/h")
+# ===============================
+# Parse GPS + Speed message
+# ===============================
+def parse_lora_message(msg: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Extract latitude, longitude, speed from LoRa message.
+    Accepts both SPD: and SPEED: formats.
+    """
+    pattern = r"LAT:([\-0-9.]+)\s+LON:([\-0-9.]+)\s+(?:SPD|SPEED):([0-9.]+)km/h"
+    match = re.search(pattern, msg)
+    if match:
+        try:
+            lat = float(match.group(1))
+            lon = float(match.group(2))
+            speed = float(match.group(3))
+            return lat, lon, speed
+        except ValueError:
+            return None, None, None
+    return None, None, None
+
+
+# ===============================
+# GUI Application
+# ===============================
+class GPSReceiverApp:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("LoRa GPS Receiver")
+        self.root.geometry("1200x780")
+        self.root.configure(bg="#1e1e2f")
+
+        # Fonts
+        self.title_font = ("Helvetica", 14, "bold")
+        self.info_font = ("Helvetica", 12, "bold")
+        self.msg_font = ("Courier", 11)
+
+        # === Top info frame ===
+        top_frame = tk.Frame(root, bg="#2e2e3f", height=70)
+        top_frame.pack(side=tk.TOP, fill=tk.X, pady=5, padx=5)
+
+        # Clock box
+        clock_frame = tk.Frame(top_frame, bg="#3e3e5f", bd=2, relief=tk.RIDGE)
+        clock_frame.pack(side=tk.LEFT, padx=10, pady=10)
+        tk.Label(clock_frame, text="Clock", font=self.info_font, fg="#ffffff", bg="#3e3e5f").pack()
+        self.clock_label = tk.Label(clock_frame, text="", font=self.title_font, fg="#00ffff", bg="#3e3e5f")
+        self.clock_label.pack(padx=10, pady=5)
+
+        # Speed box
+        speed_frame = tk.Frame(top_frame, bg="#3e3e5f", bd=2, relief=tk.RIDGE)
+        speed_frame.pack(side=tk.LEFT, padx=10, pady=10)
+        tk.Label(speed_frame, text="Speed", font=self.info_font, fg="#ffffff", bg="#3e3e5f").pack()
+        self.speed_label = tk.Label(speed_frame, text="0.00 km/h", font=self.title_font, fg="#00ff00", bg="#3e3e5f")
+        self.speed_label.pack(padx=10, pady=5)
+
+        # Status box
+        status_frame = tk.Frame(top_frame, bg="#3e3e5f", bd=2, relief=tk.RIDGE)
+        status_frame.pack(side=tk.LEFT, padx=10, pady=10, fill=tk.X, expand=True)
+        tk.Label(status_frame, text="Status", font=self.info_font, fg="#ffffff", bg="#3e3e5f").pack(anchor="w", padx=5)
+        self.status_label = tk.Label(status_frame, text="Waiting for LoRa data...", font=self.info_font, fg="#ffff00", bg="#3e3e5f")
+        self.status_label.pack(anchor="w", padx=5, pady=5)
+
+        # === Map panel ===
+        map_frame = tk.Frame(root, bg="#1e1e2f")
+        map_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.map_widget = TkinterMapView(map_frame, width=1180, height=450, corner_radius=0)
+        self.map_widget.set_position(20.5937, 78.9629)  # Default to India
+        self.map_widget.set_zoom(5)
+        self.map_widget.pack()
+        self.marker = None
+
+        # === Message log ===
+        bottom_frame = tk.Frame(root, bg="#1e1e2f")
+        bottom_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=10, pady=5)
+        tk.Label(bottom_frame, text="Received Messages:", font=self.info_font, fg="#ffffff", bg="#1e1e2f").pack(anchor="w", padx=5)
+        self.message_box = scrolledtext.ScrolledText(bottom_frame, wrap=tk.WORD, height=8, font=self.msg_font,
+                                                     bg="#2e2e3f", fg="#ffffff", insertbackground="#ffffff")
+        self.message_box.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.message_box.configure(state="disabled")
+
+        # LoRa receiver
+        self.receiver = LoRaReceiver(UART_PORT, BAUDRATE)
+        self.running = True
+
+        # Start background reader + clock
+        threading.Thread(target=self.read_lora_data, daemon=True).start()
+        self.update_clock()
+
+    def read_lora_data(self) -> None:
+        """Read LoRa data continuously in thread."""
+        while self.running:
+            msg = self.receiver.receive()
+            if msg:
+                self.log_message(msg)
+                lat, lon, speed = parse_lora_message(msg)
+                if lat is not None and lon is not None:
+                    self.update_map(lat, lon)
+                    self.update_speed(speed)
+                    self.status_label.config(text=f"Fix: LAT={lat:.6f}, LON={lon:.6f}", fg="#00ff00")
+                else:
+                    self.status_label.config(text="Invalid data received", fg="#ff0000")
+            time.sleep(0.1)
+
+    def update_speed(self, speed_kmh: float) -> None:
+        """Update speed label color-coded."""
+        if speed_kmh < 5:
+            color = "#00ff00"
+        elif speed_kmh < 20:
+            color = "#ffa500"
         else:
-            self.marker = self.map_widget.set_marker(lat, lon,
-                                                     text=f"📍 LoRa GPS\nSpeed: {spd:.2f} km/h",
-                                                     marker_color_circle=marker_color)
+            color = "#ff0000"
+        self.speed_label.config(text=f"{speed_kmh:.2f} km/h", fg=color)
 
-        self.path_points.append((lat, lon))
-        if len(self.path_points) > 1:
-            if self.path_line:
-                self.map_widget.delete(self.path_line)
-            self.path_line = self.map_widget.set_path(self.path_points, color="cyan", width=3)
-
-        if self.auto_center:
+    def update_map(self, lat: float, lon: float) -> None:
+        """Update map + marker."""
+        try:
             self.map_widget.set_position(lat, lon)
+            self.map_widget.set_zoom(18)
+            if self.marker:
+                self.marker.set_position(lat, lon)
+            else:
+                self.marker = self.map_widget.set_marker(lat, lon, text="Current Location")
+        except Exception as e:
+            print(f"[WARN] Map update failed: {e}")
 
-    def set_street_map(self):
-        self.map_widget.set_tile_server("https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", max_zoom=20)
+    def log_message(self, msg: str) -> None:
+        """Append a message to log with timestamp."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.message_box.configure(state="normal")
+        self.message_box.insert(tk.END, f"[{timestamp}] {msg}\n")
+        self.message_box.yview(tk.END)
+        self.message_box.configure(state="disabled")
 
-    def set_satellite_map(self):
-        self.map_widget.set_tile_server("https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", max_zoom=20)
+    def update_clock(self) -> None:
+        """Update clock label."""
+        current_time = datetime.now().strftime("%H:%M:%S")
+        self.clock_label.config(text=current_time)
+        self.root.after(1000, self.update_clock)
 
-    def set_hybrid_map(self):
-        self.map_widget.set_tile_server("https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", max_zoom=20)
-
-    def toggle_map(self):
-        self.map_mode_index = (self.map_mode_index + 1) % len(self.map_modes)
-        mode = self.map_modes[self.map_mode_index]
-        if mode == "street":
-            self.set_street_map()
-            self.map_toggle_button.config(text="🗺 Switch to Satellite")
-        elif mode == "satellite":
-            self.set_satellite_map()
-            self.map_toggle_button.config(text="🗺 Switch to Hybrid")
-        elif mode == "hybrid":
-            self.set_hybrid_map()
-            self.map_toggle_button.config(text="🗺 Switch to Street")
-
-    def toggle_center(self):
-        self.auto_center = not self.auto_center
-        status = "ON" if self.auto_center else "OFF"
-        self.center_button.config(text=f"📍 Auto-Center {status}")
-
-    # ---------------- Close ----------------
-    def on_close(self):
-        self.stop_receiving()
-        self.root.destroy()
+    def on_close(self) -> None:
+        """Stop gracefully."""
+        if messagebox.askokcancel("Quit", "Do you want to quit?"):
+            self.running = False
+            self.receiver.close()
+            self.root.destroy()
 
 
-# ---------------- Global Exception Handler ----------------
-def global_exception_handler(exc_type, exc_value, exc_traceback):
-    error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-    try:
-        if "app" in globals() and hasattr(app, "log_message"):
-            app.log_message(f"⚠️ Unhandled Error: {exc_value}", "error")
-        else:
-            print("⚠️ Unhandled Exception:", error_msg)
-    except Exception:
-        print("⚠️ Unhandled Exception:", error_msg)
-
-
+# ===============================
+# Main
+# ===============================
 if __name__ == "__main__":
-    sys.excepthook = global_exception_handler
     root = tk.Tk()
     app = GPSReceiverApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
