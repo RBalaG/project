@@ -1,7 +1,6 @@
 #!/usr/bin/python3
 # -- coding: UTF-8 --
 import serial
-import pynmea2
 import time
 from datetime import datetime
 import sys
@@ -31,21 +30,42 @@ def init_serial():
         sys.exit(1)
 
 # ===============================
-# Haversine distance calculation
+# Parse GPRMC NMEA sentence
 # ===============================
-def haversine(lat1, lon1, lat2, lon2):
-    """
-    Calculate distance in km between two points on Earth
-    """
-    R = 6371.0  # Earth radius in km
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
+def parse_gprmc(sentence):
+    try:
+        parts = sentence.split(",")
+        if len(parts) < 9:
+            return None
 
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
+        if parts[2] != "A":  # "A" means valid fix
+            return None
+
+        # Latitude
+        raw_lat = parts[3]
+        lat_dir = parts[4]
+        lat_deg = float(raw_lat[:2])
+        lat_min = float(raw_lat[2:])
+        lat = lat_deg + (lat_min / 60.0)
+        if lat_dir == "S":
+            lat = -lat
+
+        # Longitude
+        raw_lon = parts[5]
+        lon_dir = parts[6]
+        lon_deg = float(raw_lon[:3])
+        lon_min = float(raw_lon[3:])
+        lon = lon_deg + (lon_min / 60.0)
+        if lon_dir == "W":
+            lon = -lon
+
+        # Speed (knots → km/h)
+        spd_knots = float(parts[7]) if parts[7] else 0.0
+        speed_kmh = spd_knots * 1.852
+
+        return lat, lon, speed_kmh
+    except Exception:
+        return None
 
 # ===============================
 # Main Loop
@@ -53,57 +73,26 @@ def haversine(lat1, lon1, lat2, lon2):
 def main():
     ser = init_serial()
     print("======================================")
-    print("  GPS + Speed Calculation + LoRa Sender")
+    print("  GPS + Speed Calculation + LoRa Sender (No pynmea2)")
     print("======================================")
-
-    last_lat = None
-    last_lon = None
-    last_time = None
 
     while True:
         try:
             line = ser.readline().decode('ascii', errors='ignore').strip()
-            if not line:
+            if not line.startswith("$GPRMC"):
                 continue
 
-            # Only process GGA or RMC sentences
-            if line.startswith('$GPGGA') or line.startswith('$GPRMC'):
-                try:
-                    msg = pynmea2.parse(line)
+            parsed = parse_gprmc(line)
+            if parsed:
+                lat, lon, speed_kmh = parsed
+                timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                message = f"{timestamp} LAT:{lat:.7f} LON:{lon:.7f} SPEED:{speed_kmh:.2f}km/h"
 
-                    # Check if msg has valid coordinates
-                    if hasattr(msg, 'latitude') and hasattr(msg, 'longitude') and msg.latitude and msg.longitude:
-                        lat = float(msg.latitude)
-                        lon = float(msg.longitude)
-                        current_time = time.time()
-                        speed_kmh = 0.0
+                # TODO: Replace this with your LoRa transmit function
+                # Example: lora.send(message.encode())
+                print(f"[LORA] {message}")
 
-                        # Calculate speed if previous point exists
-                        if last_lat is not None and last_lon is not None and last_time is not None:
-                            dist_km = haversine(last_lat, last_lon, lat, lon)
-                            delta_time = current_time - last_time
-                            if delta_time > 0:
-                                speed_kmh = (dist_km / delta_time) * 3600.0  # km/h
-
-                        # Update last known location/time
-                        last_lat, last_lon, last_time = lat, lon, current_time
-
-                        # Format message with 7-digit precision
-                        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        message = f"{timestamp} LAT:{lat:.7f} LON:{lon:.7f} SPEED:{speed_kmh:.2f}km/h"
-
-                        # For LoRa sending, replace this line with the appropriate code for the LoRa module
-                        # Currently this writes back to the same UART port (which may conflict with GPS input)
-                        # For example, if LoRa is on a different serial port, open it similarly to ser_lora = serial.Serial(...)
-                        ser.write((message + "\n").encode('utf-8'))
-
-                        print(f"[LORA] {message}")
-
-                        time.sleep(SEND_INTERVAL)
-
-                except pynmea2.ParseError:
-                    # Ignore invalid NMEA sentences
-                    continue
+                time.sleep(SEND_INTERVAL)
 
         except KeyboardInterrupt:
             print("\n[INFO] Exiting gracefully...")
